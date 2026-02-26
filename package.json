@@ -1,1 +1,1 @@
-{\n  "dependencies": {\n    "react": "^18.2.0",\n    "react-native": "^0.72.0",\n    "expo": "^49.0.0"\n  },\n  "scripts": {\n    "start": "expo start",\n    "android": "expo start --android",\n    "ios": "expo start --ios"\n  }\n}
+{\n  "name": "your-project-name",\n  "version": "1.0.0",\n  "scripts": {\n    "start": "expo start",\n    "build": "expo build",\n    "test": "jest"\n  },\n  "dependencies": {\n    "react": "^17.0.1",\n    "react-native": "^0.64.2",\n    "expo": "^42.0.0"\n  }\n}
