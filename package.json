@@ -1,1 +1,1 @@
-{"name": "projects-","version": "1.0.0","description": "A basic Node.js project","main": "index.js","scripts": {"test": "echo 'Error: no test specified' && exit 1"},"keywords": [],"author": "","license": "ISC"}
+{\n  "dependencies": {\n    "react": "^18.2.0",\n    "react-native": "^0.72.0",\n    "expo": "^49.0.0"\n  },\n  "scripts": {\n    "start": "expo start",\n    "android": "expo start --android",\n    "ios": "expo start --ios"\n  }\n}
