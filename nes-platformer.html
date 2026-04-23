@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>NES-Style Platformer Physics Prototype</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background: #000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: monospace;
+}
+canvas {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    border: 2px solid #444;
+}
+#info {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    color: #0f0;
+    font-size: 12px;
+    background: rgba(0,0,0,0.8);
+    padding: 8px;
+    border: 1px solid #0f0;
+}
+</style>
+</head>
+<body>
+<div id="info">
+    <div>VEL X: <span id="velX">0.00</span></div>
+    <div>VEL Y: <span id="velY">0.00</span></div>
+    <div>POS Y: <span id="posY">0</span></div>
+    <div>GROUNDED: <span id="grounded">false</span></div>
+    <div>JUMPING: <span id="jumping">false</span></div>
+</div>
+<canvas id="game" width="256" height="240"></canvas>
+<script>
+(function() {
+    'use strict';
+    
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    
+    const TILE = 16;
+    const GRAVITY = -0.7;
+    const JUMP_VELOCITY = 4.0;
+    const MAX_SPEED = 2.5;
+    const ACCEL = 0.09;
+    const FRICTION = 0.85;
+    const JUMP_CUTOFF = 0.4;
+    
+    const player = {
+        x: 32,
+        y: 160,
+        vx: 0,
+        vy: 0,
+        width: 16,
+        height: 32,
+        grounded: false,
+        jumping: false,
+        facing: 1
+    };
+    
+    const keys = {};
+    
+    const level = [];
+    for (let y = 0; y < 15; y++) {
+        level[y] = [];
+        for (let x = 0; x < 50; x++) {
+            if (y >= 13) {
+                level[y][x] = 1;
+            } else if (y === 12 && x > 5 && x < 10) {
+                level[y][x] = 0;
+            } else if (y === 12 && x > 15 && x < 20) {
+                level[y][x] = 0;
+            } else if (y === 11 && x > 25 && x < 30) {
+                level[y][x] = 0;
+            } else if (y === 12 && (x < 5 || x >= 45)) {
+                level[y][x] = 1;
+            } else if (x >= 45) {
+                level[y][x] = 1;
+            } else {
+                level[y][x] = 0;
+            }
+        }
+    }
+    
+    level[10][8] = 1;
+    level[10][9] = 1;
+    level[9][10] = 1;
+    level[9][11] = 1;
+    level[11][20] = 1;
+    level[11][21] = 1;
+    
+    function getTile(px, py) {
+        const tx = Math.floor(px / TILE);
+        const ty = Math.floor(py / TILE);
+        if (ty < 0 || ty >= level.length || tx < 0 || tx >= level[0].length) return 0;
+        return level[ty][tx];
+    }
+    
+    function collideRect(ax, ay, aw, ah, bx, by, bw, bh) {
+        return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+    }
+    
+    function checkCollision(px, py, pw, ph) {
+        const startX = Math.floor(px / TILE);
+        const startY = Math.floor(py / TILE);
+        const endX = Math.floor((px + pw - 1) / TILE);
+        const endY = Math.floor((py + ph - 1) / TILE);
+        
+        for (let ty = startY; ty <= endY; ty++) {
+            for (let tx = startX; tx <= endX; tx++) {
+                if (ty < 0 || ty >= level.length || tx < 0 || tx >= level[0].length) continue;
+                if (level[ty][tx] === 1) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    
+    function update() {
+        if (keys['ArrowLeft']) {
+            player.vx -= ACCEL;
+            player.facing = -1;
+        } else if (keys['ArrowRight']) {
+            player.vx += ACCEL;
+            player.facing = 1;
+        } else {
+            player.vx *= FRICTION;
+        }
+        
+        player.vx = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, player.vx));
+        
+        if (Math.abs(player.vx) < 0.01) player.vx = 0;
+        
+        player.vy += GRAVITY;
+        
+        let newX = player.x + player.vx;
+        if (checkCollision(newX, player.y, player.width, player.height)) {
+            while (!checkCollision(newX > player.x ? newX : player.x, player.y, player.width, player.height)) {
+                newX += newX > player.x ? 1 : -1;
+            }
+            player.vx = 0;
+            newX = player.x;
+        }
+        player.x = newX;
+        
+        let newY = player.y + player.vy;
+        if (checkCollision(player.x, newY, player.width, player.height)) {
+            if (player.vy < 0) {
+                while (!checkCollision(player.x, newY, player.width, player.height)) {
+                    newY += 1;
+                }
+            } else {
+                while (!checkCollision(player.x, newY, player.width, player.height)) {
+                    newY -= 1;
+                }
+            }
+            if (player.vy < 0) {
+                player.vy = 0;
+            } else {
+                player.grounded = true;
+                player.jumping = false;
+            }
+            player.vy = 0;
+            newY = player.y;
+        }
+        player.y = newY;
+        
+        if (player.y + player.height > canvas.height) {
+            player.x = 32;
+            player.y = 160;
+            player.vx = 0;
+            player.vy = 0;
+        }
+        
+        document.getElementById('velX').textContent = player.vx.toFixed(2);
+        document.getElementById('velY').textContent = player.vy.toFixed(2);
+        document.getElementById('posY').textContent = Math.floor(player.y);
+        document.getElementById('grounded').textContent = player.grounded;
+        document.getElementById('jumping').textContent = player.jumping;
+    }
+    
+    function draw() {
+        ctx.fillStyle = '#5c94fc';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.fillStyle = '#c84c0c';
+        for (let y = 0; y < level.length; y++) {
+            for (let x = 0; x < level[0].length; x++) {
+                if (level[y][x] === 1) {
+                    ctx.fillStyle = '#c84c0c';
+                    ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+                    ctx.fillStyle = '#fc6c24';
+                    ctx.fillRect(x * TILE + 1, y * TILE + 1, TILE - 2, TILE - 2);
+                }
+            }
+        }
+        
+        ctx.fillStyle = '#f83800';
+        ctx.fillRect(player.x, player.y, player.width, player.height);
+        
+        ctx.fillStyle = '#fff';
+        const headY = player.y + 4;
+        ctx.fillRect(player.x + 2, headY, 12, 12);
+        
+        ctx.fillStyle = '#000';
+        if (player.facing > 0) {
+            ctx.fillRect(player.x + 10, headY + 4, 2, 2);
+        } else {
+            ctx.fillRect(player.x + 4, headY + 4, 2, 2);
+        }
+    }
+    
+    function loop() {
+        update();
+        draw();
+        requestAnimationFrame(loop);
+    }
+    
+    document.addEventListener('keydown', function(e) {
+        keys[e.key] = true;
+        
+        if (e.key === 'z' || e.key === 'Z') {
+            if (player.grounded) {
+                player.vy = JUMP_VELOCITY;
+                player.grounded = false;
+                player.jumping = true;
+            }
+        }
+        
+        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].indexOf(e.key) >= 0) {
+            e.preventDefault();
+        }
+    });
+    
+    document.addEventListener('keyup', function(e) {
+        keys[e.key] = false;
+        
+        if ((e.key === 'z' || e.key === 'Z') && player.vy > 0) {
+            player.vy *= JUMP_CUTOFF;
+        }
+    });
+    
+    loop();
+})();
+</script>
+</body>
+</html>
