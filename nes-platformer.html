@@ -2,43 +2,47 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>NES-Style Platformer Physics Prototype</title>
+<title>NES Platformer - Rusty Robot</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
-    background: #000;
+    background: #1a1a2e;
     display: flex;
     justify-content: center;
     align-items: center;
     min-height: 100vh;
-    font-family: monospace;
+    font-family: 'Courier New', monospace;
 }
 canvas {
     image-rendering: pixelated;
     image-rendering: crisp-edges;
-    border: 2px solid #444;
+    border: 4px solid #4a4a6e;
+    box-shadow: 0 0 20px rgba(0,0,0,0.5);
 }
-#info {
+#ui {
     position: absolute;
     top: 10px;
     left: 10px;
-    color: #0f0;
+    color: #fff;
+    font-size: 14px;
+    text-shadow: 2px 2px #000;
+}
+#controls {
+    position: absolute;
+    bottom: 10px;
+    color: #888;
     font-size: 12px;
-    background: rgba(0,0,0,0.8);
-    padding: 8px;
-    border: 1px solid #0f0;
 }
 </style>
 </head>
 <body>
-<div id="info">
-    <div>VEL X: <span id="velX">0.00</span></div>
-    <div>VEL Y: <span id="velY">0.00</span></div>
-    <div>POS Y: <span id="posY">0</span></div>
-    <div>GROUNDED: <span id="grounded">false</span></div>
-    <div>JUMPING: <span id="jumping">false</span></div>
+<div id="ui">
+    <div>SCORE: <span id="score">000000</span></div>
+    <div>WORLD: 1-1</div>
+    <div>COINS: <span id="coins">0</span></div>
 </div>
 <canvas id="game" width="256" height="240"></canvas>
+<div id="controls">ARROWS: Move | Z: Jump | X: Run</div>
 <script>
 (function() {
     'use strict';
@@ -47,196 +51,178 @@ canvas {
     const ctx = canvas.getContext('2d');
     
     const TILE = 16;
-    const GRAVITY = -0.7;
-    const JUMP_VELOCITY = 4.0;
+    
+    // ==== PHYSICS (NES-TUNED) ====
+    const GRAVITY = 0.4;
+    const JUMP_VELOCITY = 8.0;
     const MAX_SPEED = 2.5;
+    const RUN_SPEED = 3.5;
     const ACCEL = 0.09;
     const FRICTION = 0.85;
+    const AIR_CTRL = 0.06;
     const JUMP_CUTOFF = 0.4;
+    const TERMINAL_VEL = 8.0;
     
-    const player = {
-        x: 32,
-        y: 160,
-        vx: 0,
-        vy: 0,
-        width: 16,
-        height: 32,
-        grounded: false,
-        jumping: false,
-        facing: 1
-    };
+    // ==== AUDIO ====
+    let audioCtx = null;
     
+    function initAudio() {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    
+    function playTone(freq, type = 'square', duration = 0.1, volume = 0.1) {
+        if (!audioCtx) return;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+    }
+    
+    function sfxJump() { playTone(440, 'square', 0.2); }
+    function sfxCoin() { 
+        playTone(880, 'sine', 0.1, 0.15); 
+        setTimeout(() => playTone(1200, 'sine', 0.15, 0.15), 80);
+    }
+    function sfxStomp() { playTone(110, 'square', 0.15); }
+    function sfxWin() { 
+        playTone(523, 'square', 0.15);
+        setTimeout(() => playTone(659, 'square', 0.15), 150);
+        setTimeout(() => playTone(784, 'square', 0.3), 300);
+    }
+    
+    // ==== CAMERA ====
+    const camera = { x: 0, y: 0, width: 256, height: 240 };
+    
+    function updateCamera() {
+        camera.x = Math.max(0, Math.min(player.x - 80, levelWidth - camera.width));
+    }
+    
+    // ==== ENTITY SYSTEM ====
+    class Entity {
+        constructor(x, y, w, h) {
+            this.x = x; this.y = y;
+            this.width = w; this.height = h;
+            this.vx = 0; this.vy = 0;
+            this.grounded = false;
+            this.dead = false;
+            this.facing = 1;
+        }
+        
+        update(grav, fric) {
+            this.vy += grav;
+            this.vy = Math.min(this.vy, TERMINAL_VEL);
+            
+            let newX = this.x + this.vx;
+            if (checkCollision(newX, this.y, this.width, this.height)) {
+                this.vx = 0;
+            } else {
+                this.x = newX;
+            }
+            
+            let newY = this.y + this.vy;
+            if (checkCollision(this.x, newY, this.width, this.height)) {
+                if (this.vy > 0) { this.grounded = true; }
+                this.vy = 0;
+                while (checkCollision(this.x, this.y + (this.vy >= 0 ? 1 : -1), this.width, this.height)) {
+                    this.y += this.vy >= 0 ? -1 : 1;
+                }
+            } else {
+                this.y = newY;
+                this.grounded = false;
+            }
+        }
+    }
+    
+    // ==== PLAYER ====
+    const player = new Entity(32, 160, 14, 28);
+    player.sprite = 0;
+    player.frame = 0;
+    player.running = false;
+    player.invincible = false;
+    
+    // ==== ENEMIES ====
+    const enemies = [];
+    const ENEMY_SPEED = 0.5;
+    
+    class Enemy extends Entity {
+        constructor(x, y) {
+            super(x, y, 14, 14);
+            this.vx = -ENEMY_SPEED;
+            this.type = 'slime';
+            this.animFrame = 0;
+        }
+        
+        update() {
+            super.update(GRAVITY, 1);
+            this.animFrame += 0.1;
+            
+            // Reverse on wall
+            if (this.vx === 0) this.vx *= -1;
+            
+            // Reverse on edge (look ahead)
+            const lookX = this.x + (this.vx > 0 ? 20 : -5);
+            const lookY = this.y + 20;
+            if (!checkSolid(lookX, lookY)) this.vx *= -1;
+            
+            // Fall off screen
+            if (this.y > 300) this.dead = true;
+        }
+    }
+    
+    // ==== COINS ====
+    const coins = [];
+    
+    class Coin {
+        constructor(x, y) {
+            this.x = x + 4; this.y = y + 4;
+            this.width = 8; this.height = 12;
+            this.collected = false;
+            this.animFrame = 0;
+        }
+        
+        update() {
+            this.animFrame += 0.15;
+        }
+    }
+    
+    // ==== FLAGPOLE ====
+    let flagpole = null;
+    let won = false;
+    
+    class Flagpole {
+        constructor(x, y) {
+            this.x = x; this.y = y;
+            this.reached = false;
+            this.animFrame = 0;
+        }
+    }
+    
+    // ==== INPUT ====
     const keys = {};
     
-    const level = [];
-    for (let y = 0; y < 15; y++) {
-        level[y] = [];
-        for (let x = 0; x < 50; x++) {
-            if (y >= 13) {
-                level[y][x] = 1;
-            } else if (y === 12 && x > 5 && x < 10) {
-                level[y][x] = 0;
-            } else if (y === 12 && x > 15 && x < 20) {
-                level[y][x] = 0;
-            } else if (y === 11 && x > 25 && x < 30) {
-                level[y][x] = 0;
-            } else if (y === 12 && (x < 5 || x >= 45)) {
-                level[y][x] = 1;
-            } else if (x >= 45) {
-                level[y][x] = 1;
-            } else {
-                level[y][x] = 0;
-            }
-        }
-    }
-    
-    level[10][8] = 1;
-    level[10][9] = 1;
-    level[9][10] = 1;
-    level[9][11] = 1;
-    level[11][20] = 1;
-    level[11][21] = 1;
-    
-    function getTile(px, py) {
-        const tx = Math.floor(px / TILE);
-        const ty = Math.floor(py / TILE);
-        if (ty < 0 || ty >= level.length || tx < 0 || tx >= level[0].length) return 0;
-        return level[ty][tx];
-    }
-    
-    function collideRect(ax, ay, aw, ah, bx, by, bw, bh) {
-        return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
-    }
-    
-    function checkCollision(px, py, pw, ph) {
-        const startX = Math.floor(px / TILE);
-        const startY = Math.floor(py / TILE);
-        const endX = Math.floor((px + pw - 1) / TILE);
-        const endY = Math.floor((py + ph - 1) / TILE);
-        
-        for (let ty = startY; ty <= endY; ty++) {
-            for (let tx = startX; tx <= endX; tx++) {
-                if (ty < 0 || ty >= level.length || tx < 0 || tx >= level[0].length) continue;
-                if (level[ty][tx] === 1) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-    
-    function update() {
-        if (keys['ArrowLeft']) {
-            player.vx -= ACCEL;
-            player.facing = -1;
-        } else if (keys['ArrowRight']) {
-            player.vx += ACCEL;
-            player.facing = 1;
-        } else {
-            player.vx *= FRICTION;
-        }
-        
-        player.vx = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, player.vx));
-        
-        if (Math.abs(player.vx) < 0.01) player.vx = 0;
-        
-        player.vy += GRAVITY;
-        
-        let newX = player.x + player.vx;
-        if (checkCollision(newX, player.y, player.width, player.height)) {
-            while (!checkCollision(newX > player.x ? newX : player.x, player.y, player.width, player.height)) {
-                newX += newX > player.x ? 1 : -1;
-            }
-            player.vx = 0;
-            newX = player.x;
-        }
-        player.x = newX;
-        
-        let newY = player.y + player.vy;
-        if (checkCollision(player.x, newY, player.width, player.height)) {
-            if (player.vy < 0) {
-                while (!checkCollision(player.x, newY, player.width, player.height)) {
-                    newY += 1;
-                }
-            } else {
-                while (!checkCollision(player.x, newY, player.width, player.height)) {
-                    newY -= 1;
-                }
-            }
-            if (player.vy < 0) {
-                player.vy = 0;
-            } else {
-                player.grounded = true;
-                player.jumping = false;
-            }
-            player.vy = 0;
-            newY = player.y;
-        }
-        player.y = newY;
-        
-        if (player.y + player.height > canvas.height) {
-            player.x = 32;
-            player.y = 160;
-            player.vx = 0;
-            player.vy = 0;
-        }
-        
-        document.getElementById('velX').textContent = player.vx.toFixed(2);
-        document.getElementById('velY').textContent = player.vy.toFixed(2);
-        document.getElementById('posY').textContent = Math.floor(player.y);
-        document.getElementById('grounded').textContent = player.grounded;
-        document.getElementById('jumping').textContent = player.jumping;
-    }
-    
-    function draw() {
-        ctx.fillStyle = '#5c94fc';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        
-        ctx.fillStyle = '#c84c0c';
-        for (let y = 0; y < level.length; y++) {
-            for (let x = 0; x < level[0].length; x++) {
-                if (level[y][x] === 1) {
-                    ctx.fillStyle = '#c84c0c';
-                    ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
-                    ctx.fillStyle = '#fc6c24';
-                    ctx.fillRect(x * TILE + 1, y * TILE + 1, TILE - 2, TILE - 2);
-                }
-            }
-        }
-        
-        ctx.fillStyle = '#f83800';
-        ctx.fillRect(player.x, player.y, player.width, player.height);
-        
-        ctx.fillStyle = '#fff';
-        const headY = player.y + 4;
-        ctx.fillRect(player.x + 2, headY, 12, 12);
-        
-        ctx.fillStyle = '#000';
-        if (player.facing > 0) {
-            ctx.fillRect(player.x + 10, headY + 4, 2, 2);
-        } else {
-            ctx.fillRect(player.x + 4, headY + 4, 2, 2);
-        }
-    }
-    
-    function loop() {
-        update();
-        draw();
-        requestAnimationFrame(loop);
-    }
-    
     document.addEventListener('keydown', function(e) {
+        initAudio();
         keys[e.key] = true;
         
         if (e.key === 'z' || e.key === 'Z') {
-            if (player.grounded) {
+            if (player.grounded && !won) {
                 player.vy = JUMP_VELOCITY;
                 player.grounded = false;
-                player.jumping = true;
+                sfxJump();
             }
         }
         
-        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].indexOf(e.key) >= 0) {
+        if (e.key === 'x' || e.key === 'X') {
+            player.running = true;
+        }
+        
+        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) {
             e.preventDefault();
         }
     });
@@ -247,8 +233,432 @@ canvas {
         if ((e.key === 'z' || e.key === 'Z') && player.vy > 0) {
             player.vy *= JUMP_CUTOFF;
         }
+        
+        if (e.key === 'x' || e.key === 'X') {
+            player.running = false;
+        }
     });
     
+    // ==== LEVEL DATA ====
+    // 0 = sky, 1 = ground, 2 = question block, 3 = brick, 4 = pipe, 5 = flagpole
+    let level = [];
+    let levelWidth = 0;
+    
+    function createLevel() {
+        level = [];
+        for (let y = 0; y < 16; y++) {
+            level[y] = [];
+            for (let x = 0; x < 100; x++) {
+                let tile = 0;
+                
+                // Ground (rows 13-15)
+                if (y >= 13) tile = 1;
+                
+                // Walls at start
+                else if (x < 5 && y >= 12) tile = 1;
+                
+                // Pits
+                else if (y === 13 && x >= 8 && x <= 11) tile = 0;
+                else if (y === 13 && x >= 22 && x <= 25) tile = 0;
+                else if (y === 13 && x >= 35 && x <= 40) tile = 0;
+                else if (y === 13 && x >= 50 && x <= 55) tile = 0;
+                else if (y === 13 && x >= 65 && x <= 70) tile = 0;
+                
+                // Floating platforms
+                else if (y === 9 && x >= 12 && x <= 14) tile = 1;
+                else if (y === 8 && x >= 25 && x <= 27) tile = 1;
+                else if (y === 7 && x >= 38 && x <= 42) tile = 1;
+                else if (y === 6 && x >= 52 && x <= 54) tile = 1;
+                else if (y === 8 && x >= 60 && x <= 63) tile = 1;
+                
+                // Question blocks with coins
+                else if (y === 9 && x === 18) tile = 2;
+                else if (y === 9 && x === 30) tile = 2;
+                else if (y === 9 && x === 45) tile = 2;
+                else if (y === 7 && x === 55) tile = 2;
+                
+                // Bricks
+                else if (y === 10 && x >= 20 && x <= 21) tile = 3;
+                
+                level[y][x] = tile;
+            }
+        }
+        levelWidth = 100 * TILE;
+        
+        // Spawn enemies
+        enemies.length = 0;
+        enemies.push(new Enemy(200, 192));
+        enemies.push(new Enemy(350, 192));
+        enemies.push(new Enemy(500, 192));
+        enemies.push(new Enemy(700, 192));
+        enemies.push(new Enemy(900, 64));
+        
+        // Spawn coins
+        coins.length = 0;
+        coins.push(new Coin(144, 144));
+        coins.push(new Coin(288, 144));
+        coins.push(new Coin(420, 144));
+        coins.push(new Coin(504, 96));
+        coins.push(new Coin(720, 96));
+        coins.push(new Coin(750, 96));
+        
+        // Flagpole at end
+        flagpole = new Flagpole(1500, 48);
+    }
+    
+    function checkCollision(px, py, w, h) {
+        const startX = Math.floor(px / TILE);
+        const endX = Math.floor((px + w - 1) / TILE);
+        const startY = Math.floor(py / TILE);
+        const endY = Math.floor((py + h - 1) / TILE);
+        
+        for (let ty = startY; ty <= endY; ty++) {
+            for (let tx = startX; tx <= endX; tx++) {
+                if (ty < 0 || ty >= level.length) continue;
+                if (tx < 0 || tx >= level[0].length) continue;
+                if (level[ty][tx] === 1 || level[ty][tx] === 3 || level[ty][tx] === 4) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    
+    function checkSolid(x, y) {
+        const tx = Math.floor(x / TILE);
+        const ty = Math.floor(y / TILE);
+        if (ty < 0 || ty >= level.length || tx < 0 || tx >= level[0].length) return false;
+        return level[ty][tx] === 1 || level[ty][tx] === 3;
+    }
+    
+    function checkQuestionBlock(x, y) {
+        const tx = Math.floor(x / TILE);
+        const ty = Math.floor(y / TILE);
+        if (ty < 0 || ty >= level.length || tx < 0 || tx >= level[0].length) return null;
+        if (level[ty][tx] === 2) return { x: tx * TILE, y: ty * TILE };
+        return null;
+    }
+    
+    // ==== GAME STATE ====
+    let score = 0;
+    let coinCount = 0;
+    let gameStarted = false;
+    
+    function addScore(points) {
+        score += points;
+        document.getElementById('score').textContent = score.toString().padStart(6, '0');
+    }
+    
+    // ==== DRAWING ====
+    function drawPlayer() {
+        const px = Math.floor(player.x - camera.x);
+        const py = Math.floor(player.y);
+        
+        if (player.dead) return;
+        
+        // Body (red/orange robot)
+        ctx.fillStyle = '#e74c3c';
+        ctx.fillRect(px + 1, py + 8, 12, 20);
+        
+        // Head
+        ctx.fillStyle = '#f5b041';
+        ctx.fillRect(px + 2, py, 10, 10);
+        
+        // Eyes
+        ctx.fillStyle = '#000';
+        if (player.facing > 0) {
+            ctx.fillRect(px + 8, py + 3, 2, 3);
+        } else {
+            ctx.fillRect(px + 4, py + 3, 2, 3);
+        }
+        
+        // Antenna
+        ctx.fillStyle = '#888';
+        ctx.fillRect(px + 6, py - 3, 2, 3);
+        
+        // Feet animation
+        ctx.fillStyle = '#555';
+        const footOffset = Math.floor(player.frame) % 2 === 0 ? 0 : 2;
+        if (Math.abs(player.vx) > 0.1 && player.grounded) {
+            ctx.fillRect(px + 2, py + 26, 4, 4);
+            ctx.fillRect(px + 8 + footOffset, py + 26, 4, 4);
+        } else {
+            ctx.fillRect(px + 2, py + 26, 4, 4);
+            ctx.fillRect(px + 8, py + 26, 4, 4);
+        }
+    }
+    
+    function drawEnemy(e) {
+        const px = Math.floor(e.x - camera.x);
+        const py = Math.floor(e.y);
+        
+        if (e.dead) return;
+        
+        // Slime body
+        const squish = Math.sin(e.animFrame * Math.PI) * 2;
+        ctx.fillStyle = '#8e44ad';
+        ctx.fillRect(px + 1, py + 2 + squish, 12, 12 - squish);
+        
+        // Eyes
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(px + 3, py + 4 + squish, 3, 3);
+        ctx.fillRect(px + 8, py + 4 + squish, 3, 3);
+        ctx.fillStyle = '#000';
+        ctx.fillRect(px + 4, py + 5 + squish, 1, 1);
+        ctx.fillRect(px + 9, py + 5 + squish, 1, 1);
+    }
+    
+    function drawCoin(c) {
+        if (c.collected) return;
+        
+        const px = c.x - camera.x;
+        const py = c.y;
+        
+        // Spinning coin
+        ctx.fillStyle = '#f1c40f';
+        const width = Math.abs(Math.sin(c.animFrame * Math.PI)) * 6 + 2;
+        ctx.fillRect(px + 4 - width/2, py, width, 10);
+        
+        // Shine
+        ctx.fillStyle = '#fff';
+        if (width > 4) {
+            ctx.fillRect(px + 4, py + 2, 1, 2);
+        }
+    }
+    
+    function drawTile(x, y, type) {
+        const tx = x * TILE - camera.x;
+        const ty = y * TILE;
+        
+        if (tx < -16 || tx > 256) return;
+        
+        switch(type) {
+            case 1: // Ground
+                ctx.fillStyle = '#c0392b';
+                ctx.fillRect(tx, ty, TILE, TILE);
+                ctx.fillStyle = '#d35400';
+                ctx.fillRect(tx + 1, ty + 1, TILE - 2, TILE - 2);
+                // Texture
+                ctx.fillStyle = '#a93226';
+                ctx.fillRect(tx + 2, ty + 2, 4, 2);
+                ctx.fillRect(tx + 10, ty + 8, 4, 2);
+                break;
+                
+            case 2: // Question block
+                ctx.fillStyle = '#f39c12';
+                ctx.fillRect(tx, ty, TILE, TILE);
+                ctx.fillStyle = '#f1c40f';
+                ctx.fillRect(tx + 1, ty + 1, TILE - 2, TILE - 2);
+                // Question mark
+                ctx.fillStyle = '#d35400';
+                ctx.fillRect(tx + 5, ty + 4, 2, 2);
+                ctx.fillRect(tx + 9, ty + 4, 2, 2);
+                ctx.fillRect(tx + 7, ty + 7, 2, 2);
+                ctx.fillRect(tx + 5, ty + 10, 6, 2);
+                break;
+                
+            case 3: // Brick
+                ctx.fillStyle = '#962d22';
+                ctx.fillRect(tx, ty, TILE, TILE);
+                ctx.fillStyle = '#aa3e36';
+                ctx.fillRect(tx + 1, ty + 1, TILE - 2, TILE - 2);
+                // Brick lines
+                ctx.fillStyle = '#7b241c';
+                ctx.fillRect(tx, ty + 7, TILE, 1);
+                break;
+                
+            case 4: // Pipe
+                ctx.fillStyle = '#27ae60';
+                ctx.fillRect(tx, ty, TILE, TILE);
+                ctx.fillStyle = '#2ecc71';
+                ctx.fillRect(tx + 2, ty + 2, TILE - 4, TILE - 4);
+                break;
+        }
+    }
+    
+    function drawLevel() {
+        for (let y = 0; y < level.length; y++) {
+            for (let x = 0; x < level[0].length; x++) {
+                if (level[y][x] > 0) {
+                    drawTile(x, y, level[y][x]);
+                }
+            }
+        }
+        
+        // Flagpole
+        if (flagpole) {
+            const fx = flagpole.x - camera.x;
+            ctx.fillStyle = '#ecf0f1';
+            ctx.fillRect(fx, flagpole.y, 4, 192);
+            
+            // Flag
+            ctx.fillStyle = '#e74c3c';
+            const flagWave = Math.sin(Date.now() / 200) * 3;
+            ctx.fillRect(fx + 4, flagpole.y + 10 + flagWave, 20, 14);
+            
+            // Pole top
+            ctx.fillStyle = '#f1c40f';
+            ctx.fillRect(fx - 2, flagpole.y, 8, 4);
+        }
+    }
+    
+    function drawGameOver() {
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fillRect(0, 0, 256, 240);
+        
+        ctx.fillStyle = '#fff';
+        ctx.font = '20px monospace';
+        ctx.fillText('GAME OVER', 80, 110);
+        
+        ctx.font = '12px monospace';
+        ctx.fillText('Press Z to restart', 80, 140);
+    }
+    
+    function drawWin() {
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fillRect(0, 0, 256, 240);
+        
+        ctx.fillStyle = '#f1c40f';
+        ctx.font = '20px monospace';
+        ctx.fillText('LEVEL CLEAR!', 75, 110);
+        
+        ctx.fillStyle = '#fff';
+        ctx.font = '12px monospace';
+        ctx.fillText('SCORE: ' + score, 95, 140);
+    }
+    
+    // ==== UPDATE LOOP ====
+    function update() {
+        if (!gameStarted || won) return;
+        
+        // Player movement
+        const acc = player.grounded ? ACCEL : AIR_CTRL;
+        const maxSpd = player.running ? RUN_SPEED : MAX_SPEED;
+        
+        if (keys['ArrowLeft']) {
+            player.vx -= acc;
+            player.facing = -1;
+        } else if (keys['ArrowRight']) {
+            player.vx += acc;
+            player.facing = 1;
+        } else {
+            player.vx *= FRICTION;
+        }
+        
+        player.vx = Math.max(-maxSpd, Math.min(maxSpd, player.vx));
+        if (Math.abs(player.vx) < 0.01) player.vx = 0;
+        
+        // Animation
+        if (Math.abs(player.vx) > 0.1 && player.grounded) {
+            player.frame += Math.abs(player.vx) * 0.3;
+        }
+        
+        player.update(GRAVITY, FRICTION);
+        
+        // Fall death
+        if (player.y > 250) {
+            player.dead = true;
+        }
+        
+        // Enemy collision
+        enemies.forEach(e => {
+            if (e.dead) return;
+            e.update();
+            
+            // Check collision with player
+            if (player.x < e.x + e.width && player.x + player.width > e.x &&
+                player.y < e.y + e.height && player.y + player.height > e.y) {
+                
+                if (player.vy > 0 && player.y + player.height < e.y + 10) {
+                    // Stomp!
+                    e.dead = true;
+                    player.vy = 4;
+                    addScore(100);
+                    sfxStomp();
+                } else if (!player.invincible) {
+                    player.dead = true;
+                }
+            }
+        });
+        
+        // Coin collection
+        coins.forEach(c => {
+            if (c.collected) return;
+            c.update();
+            
+            if (player.x < c.x + c.width && player.x + player.width > c.x &&
+                player.y < c.y + c.height && player.y + player.height > c.y) {
+                c.collected = true;
+                coinCount++;
+                addScore(200);
+                document.getElementById('coins').textContent = coinCount;
+                sfxCoin();
+            }
+        });
+        
+        // Flagpole
+        if (flagpole) {
+            if (Math.abs(player.x - flagpole.x) < 20 && player.y > flagpole.y + 100) {
+                won = true;
+                addScore(1000);
+                sfxWin();
+            }
+        }
+        
+        // Camera
+        updateCamera();
+    }
+    
+    function draw() {
+        // Sky
+        ctx.fillStyle = '#5c94fc';
+        ctx.fillRect(0, 0, 256, 240);
+        
+        // Clouds (simple)
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(50 - camera.x % 100, 30, 30, 12);
+        ctx.fillRect(55 - camera.x % 100, 35, 20, 8);
+        ctx.fillRect(200 - camera.x % 100, 50, 25, 10);
+        ctx.fillRect(205 - camera.x % 100, 54, 15, 6);
+        
+        drawLevel();
+        coins.forEach(drawCoin);
+        enemies.forEach(drawEnemy);
+        drawPlayer();
+        
+        if (player.dead && !won) {
+            drawGameOver();
+        } else if (won) {
+            drawWin();
+        }
+    }
+    
+    function loop() {
+        update();
+        draw();
+        requestAnimationFrame(loop);
+    }
+    
+    // ==== START ====
+    document.addEventListener('keydown', function(e) {
+        if ((e.key === 'z' || e.key === 'Z') && (player.dead || !gameStarted || won)) {
+            // Restart
+            createLevel();
+            player.x = 32;
+            player.y = 160;
+            player.vx = 0;
+            player.vy = 0;
+            player.dead = false;
+            won = false;
+            score = 0;
+            coinCount = 0;
+            addScore(0);
+            document.getElementById('coins').textContent = '0';
+            gameStarted = true;
+        }
+    });
+    
+    createLevel();
     loop();
 })();
 </script>
